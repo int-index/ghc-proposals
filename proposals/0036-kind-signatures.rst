@@ -77,9 +77,6 @@ Proposed Change Specification
 
    Associated types may be given kind signatures within their classes.
 
-   Unlike type signatures, the type variables brought into scope in a type-level kind
-   signature do *not* scope over the type definition.
-
    Top-level kind signatures are enabled with the extension ``-XTopLevelKindSignatures``.
 
 2. Introduce a new extension ``-XCUSKs``, on by default, that detects CUSKs as they

@@ -17,88 +17,139 @@ We propose to allow visible erased dependent quantification, written as
 Background
 ----------
 
-(Skip to "Motivation" if you are comfortable with the notions of dependence,
-erasure, and visibility, when talking about quantifiers).
+This proposal closely follows the design sketch laid out in the accepted proposal
+`#378 Design for Dependent Types <https://github.com/ghc-proposals/ghc-proposals/blob/master/proposals/0378-dependent-type-design.rst>`_.
+It may help to read that design sketch first.
 
-Function parameters can be bound using various quantifiers. Consider the
-identity function::
+In particular, we use the following terminology:
 
-  id :: forall a. a -> a
-  id = \x -> x
+Type syntax
+  Parts of the program that are parsed with the ``type`` family of
+  non-terminals (i.e. ``type``, ``btype``, ``atype``, etc) or the ``kind``
+  non-terminal are considered to be written in **type syntax**.
 
-There are two parameters to ``id``:
+  This includes (but is not limited to) types in type or class declarations,
+  types after the ``::`` in a type or kind signature, types after the ``@``
+  sign in visible type applications, the LHS and the RHS of type family
+  instances, and so on.
 
-1. ``a :: Type``
-2. ``x :: a``
+Term syntax
+  Parts of the program that are parsed with the ``exp`` family of
+  non-terminals (i.e. ``exp``, ``infixexp``, ``fexp``, ``aexp``, etc) or
+  the ``pat`` family of non-terminals (i.e. ``pat``, ``apat``, etc) are
+  considered to be written in **term syntax**.
 
-Quantifiers are parts of the type that introduce the function parameter. In the
-type of ``id``, there are two quantifiers:
+  This includes (but is not limited to) the LHS and the RHS of function
+  bindings ``f x y = e``, the LHS and the RHS of pattern bindings ``p = e``,
+  the LHS and the RHS of ``p <- e`` bindings in ``do``-notation, the top-level
+  Template Haskell splices (e.g. ``makeLenses ''T``), and so on.
 
-1. ``forall a.`` introduces ``a :: Type``
-2. ``a ->`` introduces ``x :: a``
+Namespace
+  Any identifier (including variables, type variables, data constructors, and
+  type constructors) is said to belong to one of the two namespaces: the **term
+  namespace** and the **type namespace**. The namespace of an identifier is
+  determined at its binding site.
 
-We classify quantifiers along several axes:
+  Identifiers bound in type syntax populate the type namespace; identifiers
+  bound in term syntax populate the term namespace.
 
-* Dependent or non-dependent
-* Erased or retained
-* Visible or invisible
+Punning
+  Punning occurs when identifiers of the same spelling are introduced in both
+  namespaces, for example::
+
+    data T = T
+
+  Now any use of ``T`` must use certain rules to disambiguate which ``T`` is
+  referred to.
+
+Quantifier
+  Parts of a type that introduce a function parameter are called quantifiers:
+
+  * ``forall a. ty``
+  * ``forall a -> ty``
+  * ``foreach a. ty``
+  * ``foreach a -> ty``
+  * ``Eq a => ty``
+  * ``t1 -> t2``
+
+  (To see how ``=>`` is a quantifier, one must desugar it with dictionary-passing style).
+
+  We classify quantifiers along several axes:
+
+  * Dependent or non-dependent
+  * Erased or retained
+  * Visible or invisible
 
 Dependence
-~~~~~~~~~~
-We call a quantifier dependent when the parameter can be used in the type of
-the function result. ``forall a.``, which introduces ``a :: Type``, is a
-dependent quantifier::
+  We call a quantifier dependent when the parameter can be used in the type of
+  the function result. ``forall a.``, which introduces ``a :: Type``, is a
+  dependent quantifier::
 
-  id :: forall a. a -> a
-                 ^^^^^^^^^^^^^^^^
-                 'a' is used here
+    id :: forall a. a -> a
+                   ^^^^^^^^^^^^^^^^
+                   'a' is used here
 
-On the other hand, ``a ->``, which introduces ``x :: a``, is a non-dependent quantifier::
+  On the other hand, ``a ->``, which introduces ``x :: a``, is a non-dependent quantifier::
 
-  id :: forall a. a -> a
-                      ^^^^^^^^^^^^^^^^^^^^^^^
-                      'x' cannot be used here
+    id :: forall a. a -> a
+                        ^^^^^^^^^^^^^^^^^^^^^^^
+                        'x' cannot be used here
 
 Erasure
-~~~~~~~
-We call a quantifier retained when the parameter can be used in the function
-body in a position other than a type annotation, or erased otherwise.
+  We call a quantifier retained when the parameter can be pattern-matched on or
+  returned as part of the result, and, as a consequence, must be passed during
+  evaluation. For example,
 
-Intuitively, it means that retained parameters can be pattern-matched on and
-must be passed at runtime. ``forall a.``, which introduces ``a :: Type``, is an
-erased quantifier::
+  ``a ->`` is a retained quantifier::
 
-  id :: forall a. a -> a
-  id = \x -> x
-      ^^^^^^^^^
-      'a' cannot be used here (other than as a type annotation
-                               with scoped type variables)
+    id :: forall a. a -> a
+    id = \x -> x
+              ^^^
+              'x' is returned as the result
 
-On the other hand, ``a ->``, which introduces ``x :: a``, is a retained
-quantifier::
+    not :: Bool -> Bool
+    not b =
+      case b of { ... }
+          ^^^
+          'b' is used in pattern-matching
 
-  id :: forall a. a -> a
-  id = \x -> x
-            ^^^
-            'x' is used here
+  On the other hand, in types of terms, ``forall a.`` is an erased quantifier::
+
+    bad :: forall a. a -> a
+    bad x =
+      case a of { ... }
+          ^^^
+          'a' can not be pattern-matched on!
+
+  However, in types of types, ``forall a.`` is currently a retained quantifier,
+  as it permits pattern-matching::
+
+    type IsMaybe :: forall k. k -> Bool
+    type family IsMaybe a where
+      IsMaybe @(Type -> Type) Maybe = True     -- matching 'k' with (Type -> Type)
+      IsMaybe @Type (Maybe _) = True           -- matching 'k' with Type
+      IsMaybe _ = False
+
+  This is considered an oversight in the design of kind polymorphism, and we
+  generally speak of ``forall x.`` as an erased quantifier. (Making it truly so
+  is left as future work, out of scope of this proposal).
 
 Visibility
-~~~~~~~~~~
-We call a quantifier visible when the parameter must be specified at use sites,
-and invisible when the compiler tries to infer it at use sites.
+  We call a quantifier visible when the parameter must be specified at use sites,
+  and invisible when the compiler tries to infer it at use sites.
 
-Consider an expression such as ``id True``. In this call, we have:
+  Consider an expression such as ``id True``. In this call, we have:
 
-* ``x=True``, as specified
-* ``a=Bool``, as inferred from ``(x :: a) = (True :: Bool)``
+  * ``x=True``, as specified
+  * ``a=Bool``, as inferred from ``(x :: a) = (True :: Bool)``
 
-The reason we don't write ``id Bool True`` is that ``forall a.`` is an
-invisible quantifier, while ``a ->`` is a visible quantifier.
+  The reason we don't write ``id Bool True`` is that ``forall a.`` is an
+  invisible quantifier, while ``a ->`` is a visible quantifier.
 
-With the ``TypeApplications`` extension, we can use a visibility override ``@``
-to specify an invisible parameter as if it was visible::
+  With the ``TypeApplications`` extension, we can use a visibility override ``@``
+  to specify an invisible parameter as if it was visible::
 
-  id @Bool True
+    id @Bool True
 
 Motivation
 ----------
@@ -123,21 +174,21 @@ visibility::
 
   Quantifiers in
   types of types    Dependent     Non-dependent
-                 +--------------+---------------+
-        Visible  | forall a ->  |  a ->         |
-                 +--------------+---------------+
-      Invisible  | forall a.    |  c =>         |
-                 +--------------+---------------+
+                 ┌──────────────┬───────────────┐
+        Visible  │ forall a ->  │  a ->         │
+                 ├──────────────┼───────────────┤
+      Invisible  │ forall a.    │  c =>         │
+                 └──────────────┴───────────────┘
 
 On the other hand, in types of terms, our grid is incomplete::
 
   Quantifiers in
   types of terms    Dependent     Non-dependent
-                 +--------------+---------------+
-        Visible  |              |  a ->         |
-                 +--------------+---------------+
-      Invisible  | forall a.    |  c =>         |
-                 +--------------+---------------+
+                 ┌──────────────┬───────────────┐
+        Visible  │              │  a ->         │
+                 ├──────────────┼───────────────┤
+      Invisible  │ forall a.    │  c =>         │
+                 └──────────────┴───────────────┘
 
 Other than making terms and types more symmetrical, filling this empty cell
 would let us design better APIs without the use of proxy types or ambiguous
@@ -250,8 +301,147 @@ To summarize, there are three reasons to make this change:
 * Ability to design better APIs (good error messages, no proxy types, no ambiguous types)
 * Prepare the compiler internals for further work on dependent types
 
-Definitions
------------
+Proposal Structure
+------------------
+
+We shall present this proposal in two parts:
+
+* In Part I we introduce the ``forall a ->`` quantifier in types of terms but
+  also require a syntactic marker at use sites. This is not as convenient to
+  use (i.e. users would have to write ``sizeOf (type Bool)`` instead of
+  ``sizeOf Bool``), but is much easier to specify and understand.
+
+* In Part II we specify when it is permissible to omit the ``type`` herald.
+  This greatly increases the convenience of using the proposed feature, but
+  also makes the specification more intricate.
+
+
+Part I: Proposed Change Specification
+-------------------------------------
+
+1. Add a new language extension, ``RequiredTypeArguments``. When
+   ``RequiredTypeArguments`` is in effect, lift the restriction that the
+   ``forall a ->`` quantifier cannot be used in types of terms.
+
+2. **Syntax**. When ``ExplicitNamespaces`` is in effect, extend the
+   grammar as follows::
+
+        exp ::=
+          | 'type' type
+          | ...
+
+        pat ::=
+          | 'type' type
+          | ...
+
+3. **Name resolution**. A type embedded into a term with the ``type`` marker
+   follows type-level name resolution rules (i.e. uses of punned identifiers
+   resolve to the type namespace).
+
+   The ``ScopedTypeVariables`` extension has no effect on variables introduced
+   by ``forall a ->``.
+
+4. **Type checking**. In type checking, we alternate between two
+   distinct modes: *checking* and *inference*. This idea, called bidirectional
+   type checking, is presented in more detail in
+   `"A quick look at impredicativity" <https://www.microsoft.com/en-us/research/uploads/prod/2020/01/quick-look-icfp20.pdf>`_.
+
+   * In inference mode, we never infer ``forall x -> t``.
+
+   * In checking mode, in a function application chain ``f e1 e2 e3``, we
+     follow the rules shown in Figure 4 of "A quick look at impredicativity",
+     extended as follows::
+
+        G |- sigma[a := rho]; pis  ~>  Theta; phis; rho_r
+        ------------------------------------------------------------------  ITVDQ
+        G |- (forall a -> sigma); (type rho), pis  ~>  Theta; phis; rho_r
+
+   * In checking mode, in a function binding ``f (type x) = ...`` or a lambda
+     ``\(type x) -> ...``, the ``x`` is a fresh skolem.
+
+5. **Validity**. Expressions and patterns of form ``type t`` but not covered by
+   the type checking rules above are illegal.
+
+   Specifically, any expression of form ``type t`` must be used as an argument
+   to a function, or else it is rejected with a type error::
+
+     x = f (type Int)   -- OK
+     x = type Int       -- invalid use of a type in a term
+
+   This is checked during type checking, so Template Haskell is unaffected, and
+   ``[e| type Int |]`` is allowed (but different from ``[t| Int |]``).
+
+   Furthermore, any pattern of form ``type t`` must be either a variable or a
+   wildcard::
+
+     f (type x)   = ...    -- OK
+     f (type _)   = ...    -- OK
+     f (type Int) = ...    -- invalid use of a type in a term
+
+   This is also checked during type checking, so Template Haskell must be able
+   to represent patterns such as ``[p| type Int |]``.
+
+6. **Erasure**. In types of terms, ``forall a ->`` is an erased quantifier.
+   Making ``forall a ->`` erased in types of types is out of scope of this
+   proposal.
+
+Part I: Examples and Explanation
+--------------------------------
+
+1. A variant of ``id`` that uses visible ``forall``:
+   ::
+
+     -- Definition:
+     idv :: forall a -> a -> a
+     idv (type a) x = x :: a
+
+     -- Usage:
+     n = idv (type Double) 42
+
+   This is equivalent to ``n = (42 :: Double)``.
+
+2. A wrapper around ``typeRep`` that uses visible ``forall``:
+   ::
+
+     -- Definition:
+     typeRepVis :: forall a -> Typeable a => TypeRep a
+     typeRepVis (type a) = typeRep @a
+
+     -- Usage:
+     t = typeRepVis (type (Maybe String))
+
+3. A wrapper around ``sizeOf`` that uses visible ``forall`` instead of ``Proxy``:
+   ::
+
+     -- Definition:
+     sizeOfVis :: forall a -> Storable a => Int
+     sizeOfVis (type a) = sizeOf (Proxy :: Proxy a)
+
+     -- Usage:
+     n = sizeOfVis (type Int)
+
+4. A wrapper around ``symbolVal`` that uses visible ``forall`` instead of ``Proxy``:
+   ::
+
+     -- Definition:
+     symbolValVis :: forall s -> KnownSymbol s => String
+     symbolValVis (type s) = symbolVal (Proxy :: Proxy s)
+
+     -- Usage
+     str = symbolValVis (type "Hello, World")
+
+Note that as long as we limit ourselves to part I of this proposal, we need the
+``type`` marker in all of the above examples, even when the argument is a
+syntactically valid term. If the programer were to write ``symbolValVis "Hello,
+World"``, they would get an error message stating that a term argument was
+received where a type argument was expected. That's because our typing rule
+``ITVDQ`` explicitly requires the argument to be of form ``type rho``.
+
+Could we extend our system to permit arguments without the ``type`` prefix?
+That is precisely the subject of part II.
+
+Part II: Definitions
+--------------------
 
 The Resolved Syntax Tree
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -264,7 +454,8 @@ information has been fully determined:
 * Variable and type variable occurrences have been linked to their bindings, in
   accordance with shadowing and punning rules.
 
-  * Shadowing. Consider the following program::
+  * Shadowing. Consider the following program:
+    ::
 
       a = 42
       f a = \a -> a
@@ -373,265 +564,233 @@ information has been fully determined:
   1. Namespace selection syntax (under ``-XDataKinds``)
   2. Name quotation syntax (under ``-XTemplateHaskell``)
 
-Compilation Phases
-~~~~~~~~~~~~~~~~~~
+Part II: Proposed Change Specification
+--------------------------------------
 
-Define **typed syntax tree** as a representation of a Haskell program that
-encodes its syntactic and binding structure, and assigns a type to every
-expression, and a kind to every type.
+Syntax
+~~~~~~
 
-In particular, we have two distinct relations:
+1. Extend the term syntax with several constructs that
+   previously could only occur at the type level:
 
-* ``e ::ₑ t`` holds when the expression ``e`` has type ``t``
-* ``t ::ₜ k`` holds when the type ``t`` has type (kind) ``k``
+   * Function arrows: ``a -> b``
+   * Multiplicity-polymorphic function arrows: ``a %m -> b`` (under ``-XLinearTypes``)
+   * Constraint arrows: ``a => b``
+   * Universal quantification: ``forall a. b``
+   * Visible universal quantification: ``forall a -> b``.
 
-Compilation of a Haskell program includes, but is not limited to, the following
-steps:
+   We will call them **types-in-terms**.
 
-1. *Parsing and name resolution:* map the program text to a resolved syntax tree (defined above).
-2. *Type checking:* map a resolved syntax tree to a typed syntax tree (defined above).
+   Grammatically, their constituents are terms, not types::
 
-Syntactic Categories
-~~~~~~~~~~~~~~~~~~~~
+                   proposed grammar:                      as opposed to:
+         ┌────────────────────────────────────┬───────────────────────────────────────┐
+         │                                    │                                       │
+         │  exp ::=                           │    exp ::=                            │
+         │      | exp₀ '->' exp₁              │        | type₀ '->' type₁             │
+         │      | exp₀ '=>' exp₁              │        | type₀ '=>' type₁             │
+         │      | 'forall' tv_bndrs '.'  exp  │        | 'forall' tv_bndrs '.'  type  │
+         │      | 'forall' tv_bndrs '->' exp  │        | 'forall' tv_bndrs '->' type  │
+         │                                    │                                       │
+         └────────────────────────────────────┴───────────────────────────────────────┘
 
-Haskell 2010 defines the following syntactic categories:
+   This is a necessity to avoid parsing conflicts, with the following
+   consequences:
 
-1. Expressions::
+   1. The ``'`` symbol signifies Template Haskell name quotation rather than ``DataKinds`` promotion.
+   2. The ``*`` symbol is treated as an infix operator regardless of ``-XStarIsType``.
+   3. Built-in syntax for tuples and lists is interpreted as in terms.
+      That is, ``[a]`` is a singleton list rather than the type of a list,
+      and ``(a, b)`` is a pair rather than the type of a pair.
 
-     e ::=
-       | var                     -- variable occurrence
-       | Con                     -- data constructor occurrence
-       | e₀ e₁                   -- function application
-       | if e₀ then e₁ else e₂   -- conditional expression
-       | \p₀..pₙ -> e            -- lambda abstraction
-       | ...
+2. Make ``forall`` a keyword at the term level. Not guarded by any extension
+   (same motivation as `#193 <https://github.com/ghc-proposals/ghc-proposals/blob/master/proposals/0193-forall-keyword.rst>`_).
+   This implies ``forall`` is no longer a valid identifier.
 
-2. Patterns::
+3. Introduce a new extension, ``ListTupleTypeSyntax``, on by default,
+   which enables:
 
-     p ::=
-       | var          -- variable binding
-       | Con p₀..pₙ   -- data constructor pattern
-       | _            -- wildcard pattern
-       | ...
+   * ``[]`` as the list type constructor
+   * ``()`` as the unit type
+   * ``[a]`` the syntax of a list type
+   * ``(,)`` as the pair type constructor
+   * ``(a, b)`` as the syntax of a pair type
 
-3. Types::
+   When the extension is on, these constructs retain their Haskell 2010
+   meaning, which depends on whether we are in a type-level or term-level
+   context.
 
-     t ::=
-       | tv                  -- type variable occurrence
-       | TyCon               -- type constructor occurrence
-       | t₀ t₁               -- type application
-       | t₀ -> t₁            -- function type
-       | ...
+   When the extension is off, all of the above are interpreted as in terms:
 
-4. Kinds::
+   * ``[]`` is always an empty list
+   * ``()`` is always the unit data constructor
+   * ``[a]`` is always a singleton list (not the list type)
+   * ``(,)`` is always the pair data constructor (not the type constructor)
+   * ``(a, b)`` is always a pair (not the type of a pair)
 
-     k ::=
-       | *            -- the kind of inhabited types
-       | k₀ -> k₁     -- kind arrow
+   Likewise for tuples of higher arities.
 
+   Export the following synonym from the ``Data.List`` module::
 
-The GHC dialect of Haskell extends these syntactic categories with many new
-constructs, for example overloaded label ``#lbl`` in expressions, explicit
-``forall a. t`` in types, and so on. GHC also merges types and kinds into a
-single syntactic category, so that we have::
+     type List = []
 
-  e ::= var | Con | e₀ e₁ | ...
-  p ::= var | Con p₀..pₙ | _ | ...
+   Export the following synonyms from the ``Data.Tuple`` module::
 
-  t, k ::=
-       | *                   -- the kind of inhabited types
-       | t₀ -> t₁            -- function type / kind arrow
-       | tv                  -- type variable occurrence
-       | TyCon               -- type constructor occurrence
-       | t₀ t₁               -- type application
-       | ...
+     type Unit = ()
+     type TupleOf2 = (,)
+     type TupleOf3 = (,,)
+     type TupleOf4 = (,,,)
+     ... -- up to the maximum tuple arity
 
-This proposal is based on the current syntactic categories of GHC, where types
-and kinds are merged, but types and expressions remain distinct.
+   This change allows the use of built-in lists and tuples without any
+   disambugation syntax (the ``'`` promotion syntax at the type level or the
+   ``type`` herald at the term level).
 
-Proposed Change Specification
------------------------------
+4. When ``ViewPatterns`` are enabled, interpret ``f (a -> b) = ...``
+   as a view pattern, otherwise as ``f ((->) a b) = ...``.
 
-Primary Change
-~~~~~~~~~~~~~~
+5. ``case ... of x -> y -> z`` is an error. We require parentheses to
+   disambiguate:
 
-1. Add a new language extension, ``RequiredTypeArguments``. When
-   ``RequiredTypeArguments`` is in effect, lift the restriction that the
-   ``forall a ->`` quantifier cannot be used in types of terms.
+   * ``case ... of (x -> y) -> z``
+   * ``case ... of x -> (y -> z)``
 
-2. In types of terms, ``forall a ->`` is an erased quantifier.
-   This differs from its semantics in types of types, where it is retained, but
-   follows the precedent of ``forall a.``, which is also an erased
-   quantifiers in types of terms, but a retained quantifier in types of types::
+Name resolution
+~~~~~~~~~~~~~~~
 
-                            forall a.     forall a ->
-                        +--------------+---------------+
-        types of types  |   retained   |   retained    |
-                        +--------------+---------------+
-        types of terms  |    erased    |    erased     |
-                        +--------------+---------------+
+6. During name resolution,
 
-   Resolving this inconsistency between terms and types is left as future work.
+   * Identifiers bound in term syntax populate the term namespace;
+     identifiers bound in type syntax populate the type namespace.
 
-3. Decouple the syntactic distinction and the semantic distinction between
-   type and term variables.
+     This is already the case, but now we generalize this rule to cover
+     types-in-terms, which are considered term syntax.
 
-   The syntactic distinction exists in the **parsing and name resolution**
-   phase (defined above) and only affects the scope of a variable. We also
-   refer to it as the **namespace** assigned to a variable.
+   * When looking up an identifier ``v`` or ``V`` in type syntax, look it up
+     in the type namespace first; if it is not found there, look it up in the
+     term namespace.
 
-   The semantic distinction exists in the **type checking** phase (defined
-   above) and determines the **erasure** of the variable. Data variables are
-   bound by retained quantifiers, type variables are bound by erased
-   quantifiers.
+     This is already the case for uppercase identifiers if ``DataKinds`` is
+     enabled, but now we extend this rule to lowercase identifiers if
+     ``RequiredTypeArguments`` is enabled.
 
-   Before this proposal, the syntactic and semantic categories of variables
-   used to coincide: all data variables (retained) used names from the data
-   namespace, and all type variables (erased) used names from the type
-   namespace. This is no longer the case.
+   * When looking up an identifier ``v`` or ``V`` in term syntax, look it up
+     in the term namespace first; if it is not found there, look it up in the
+     type namespace.
 
-4. Extend the syntactic categories of expressions and patterns with type
-   variables and type constructors::
+     This is a new rule, but notice how it mirrors the one for type syntax.
 
-     e ::=
-           | var                     -- variable occurrence
-           | Con                     -- data constructor occurrence
-     (NEW) | tv                      -- type variable occurrence
-     (NEW) | TyCon                   -- type constructor occurrence
-           | e₀ e₁                   -- function application
-           | if e₀ then e₁ else e₂   -- conditional expression
-           | \p₀..pₙ -> e            -- lambda abstraction
-           | ...
+Implicit quantification
+~~~~~~~~~~~~~~~~~~~~~~~
 
-     p ::=
-           | var    -- variable binding
-           | Con    -- data constructor occurrence
-     (NEW) | TyCon  -- type constructor occurrence
-           | _      -- wildcard pattern
-           | ...
+7. Implicit quantification is an existing feature that allows the programmer to
+   omit a ``forall``::
 
-   A variable bound in a pattern is always assigned the data namespace, never
-   the type namespace. This is a syntactic distinction (see point 3), and in
-   the type checking environment it is possible that such a variable will map
-   to a type variable (erased).
+     g ::           a -> a    -- implicit
+     g :: forall a. a -> a    -- explicit
 
-   Extend the syntactic categories of types and kinds with term variables::
+   This sort of quantification only happens if the variable is not already in
+   scope::
 
-     t, k ::=
-            | *                   -- the kind of inhabited types
-            | t₀ -> t₁            -- function type / kind arrow
-            | tv                  -- type variable occurrence
-            | TyCon               -- type constructor occurrence
-      (NEW) | var                 -- variable occurrence
-            | Con                 -- data constructor occurrence   (pre-existing, see DataKinds)
-            | t₀ t₁               -- type application
-            | ...
+     {-# LANGUAGE ScopedTypeVariables #-}
 
-   In the *parsing and name resolution* phase (defined above):
+     f :: forall a. a -> a
+     f = ...
+       where
+         g :: a -> a         -- No implicit quantification!
 
-   * In expressions and patterns, prioritize the data namespace over the type
-     namespace. That is, in ``f T = T``, if there are both a type constructor
-     ``T`` and a data constructor ``T`` in scope, this is resolved in favor of
-     the data constructor; however, if only the type constructor is in scope,
-     do not error and resolve the reference as a type constructor occurrence.
-     Likewise for variables and type variables.
+   In other words, we quantify only over *free* variables.
 
-   * In types and kinds, prioritize the type namespace over the data namespace.
-     Guard the data variable occurrences behind the ``RequiredTypeArguments``,
-     as it is a breaking change with regards to implicit quantification.
-     Recall that we implicitly quantify over type variables that are free in
-     the type, and consider this example::
+   With the proposed changes to name resolution, variables that were previously
+   free are not free anymore::
 
        a = 42
-       f :: Proxy a -> Proxy b
+       f :: a -> a           -- No implicit quantification!
 
-     Here, ``a`` in the type of ``f`` is no longer free, as it refers to the
-     top-level term variable ``a = 42`` (``b`` is unaffected). Without
-     ``RequiredTypeArguments``, the old behavior is retained.
+   This is a breaking change, and that is why the fallback to the term
+   namespace in type syntax is guarded behind ``RequiredTypeArguments``.
+   Without ``RequiredTypeArguments``, implicit quantification is not affected.
 
-   In the *type checking* phase (defined above), we continue to require that
-   data variables/constructors (bound by retained quantifiers) are used exclusively at the
-   term level, and type variables (bound by erased quantifiers) are used
-   exclusively at the type level. Thus, these examples are ill-typed::
 
-     f _ = Int                         -- invalid occurrence of "Int" in a term-level position
+Type checking
+~~~~~~~~~~~~~
+
+8. Introduce an additional typing rule that transforms term arguments into type
+   arguments::
+
+     rho = t2t(e)
+     G |- (forall a -> sigma); type rho, pis  ~>  Theta; phis; rho_r
+     ----------------------------------------------------------------  T2T
+     G |- (forall a -> sigma);        e, pis  ~>  Theta; phis; rho_r
+
+   See "T2T-Mapping" below for an informal definition of ``t2t``.
+
+   In other words, given ``f :: forall a -> t``, the ``x`` in ``f x`` is
+   parsed and renamed as a term, but then mapped to a type.
+
+
+9. Any uses of terms in types are ill-typed:
+   ::
+
      a = 42; f :: Proxy a -> Proxy b   -- invalid occurrence of "a" in a type-level position
 
-   While these examples are accepted::
+   Any uses of types in terms that do not undergo the T2T transformation are also ill-typed::
+   ::
 
-     p = f Int           -- the input to "f" is a type, so the occurrence of "Int" is valid
+     f _ = Int                         -- invalid occurrence of "Int" in a term-level position
 
-     f :: forall a -> Typeable a => TypeRep a
-     f x = typeRep @x    -- the input to "f" is a type, so the occurrence of "x" is valid
+10. When in the checking mode of bidirectional type checking (e.g. in a function
+    binding with an explicit type signature), allow a pattern to bind type
+    variables in the term namespace, such as ``x`` here::
 
-5. When in the checking mode of bidirectional type checking (e.g. in a function
-   binding with an explicit type signature), allow a pattern to bind type
-   variables in the data namespace, such as ``x`` here::
+      f :: forall a -> ...
+      f x = ...
 
-     f :: forall a -> ...
-     f x = ...
+    The ``x`` identifier is bound in the term namespace, but stands for an
+    erased, ``forall``-bound type variable.
 
-   In the *parsing and name resolution* phase, ``a`` is a type variable,
-   whereas ``x`` is a term variable. In the *type checking* phase, both ``x``
-   and ``a`` stand for an erased, type-level, ``forall``-bound type
-   variable.
+    Just as with patterns that use the ``type`` herald explicitly, we permit
+    only variables and wildcards in such positions::
 
-   A pattern corresponding to an erasable component of a type cannot require
-   any runtime matching. This holds unconditionally for variables ``v`` and
-   wildcards ``_``. On the other hand, ``Con p₀..pₙ`` can only be
-   used in a context where it is already known that the input adheres to
-   expected form::
+      f :: forall a -> ...
+      f x   = ...               -- OK
+      f _   = ...               -- OK
+      f Int = ...               -- illegal to match on a type
 
-     data T a where
-       Typed :: forall a -> a -> T a
+    We could, but we do not relax this requirement even when the type is statically known::
 
-     g :: T Int -> ...
-     g (Typed Int x) = ...   -- OK.
+      data T a where
+        Typed :: forall a -> a -> T a
 
-     h :: forall a. T a -> ...
-     h (Typed Int x) = ...   -- Error. We cannot check that a~Int.
+      g :: T Int -> ...
+      g (Typed Int x) = ...   -- Reasonable, but no.
 
-     k :: forall a. (a ~ Int) => T a -> ...
-     k (Typed Int x) = ...   -- OK (using the supplied a~Int evidence).
+    This is a conservative decision that can be revised in a later proposal.
 
-   We never infer ``forall a -> ...``. For a pattern to introduce a type
-   variable, we must be in checking mode during bidirectional type checking
-   (see below).
+Namespaces vs Semantics
+~~~~~~~~~~~~~~~~~~~~~~~
 
-6. In type checking, we alternate between two distinct modes: *checking* and
-   *inference*. This idea, called bidirectional type checking, is presented in
-   more detail in `"A quick look at impredicativity" <https://www.microsoft.com/en-us/research/uploads/prod/2020/01/quick-look-icfp20.pdf>`_.
+11. With the proposed changes, the namespace of an identifier is no longer tied
+    to whether it stands for a type variable or a term variable.
 
-   * In inference mode, we never infer ``forall x -> t``.
-
-   * In checking mode, in a function application chain ``f e1 e2 e3``, we
-     follow the rules shown in Figure 4 of "A quick look at impredicativity",
-     extended as follows::
-
-        rho = t2t(e)
-        G |- sigma[rho/a]; pis  ~>  Theta; phis; rho_r
-        ---------------------------------------------------------  ITVDQ
-        G |- (forall a -> sigma); e,pis  ~>  Theta; phis; rho_r
-
-     See "T2T-Mapping" below for an informal definition of ``t2t``.
-
-     In other words, given ``f :: forall a -> t``, the ``x`` in ``f x`` is
-     parsed and renamed as a term, but then mapped to a type.
+    Before this proposal, all term variables (retained, values, runtime) used
+    names from the term namespace, and all type variables (erased, types,
+    compile-time) used names from the type namespace. This is no longer the
+    case.
 
 T2T-Mapping
 ~~~~~~~~~~~
 
-T2T (term-to-type) is a mapping from the syntactic category of expressions to
-the syntactic category of types. It is performed during type checking and
-operates on the resolved syntax tree (defined above).
+T2T (term-to-type) is a mapping from expressions to types that operates on a
+resolved syntax tree and is invoked by the ``T2T`` typing rule.
 
 The T2T mapping is partial: it succeeds on expressions that are within the
-Static Subset (introduced in `#378
+Static Subset (introduced in `#378 Design for Dependent Types
 <https://github.com/ghc-proposals/ghc-proposals/blob/master/proposals/0378-dependent-type-design.rst>`_),
 and fails on expressions outside of this subset.
 
-* Variables and constructors (regardless of their namespace) are present in
-  both syntactic categories and are mapped directly, without modification.
+* Variables and constructors (regardless of their namespace) are mapped
+  directly, without modification.
 
   * In the type checking environment, the variable must stand for a type variable,
     or else it treated as a fresh skolem constant.
@@ -642,6 +801,10 @@ and fails on expressions outside of this subset.
   * In the type checking environment, there should be no variable of the same
     name but from a different namespace, or else raise an ambiguity error (does
     not apply to constructors).
+
+* The types-in-terms (such as ``a -> b``, ``a => b``, ``forall a. b``) are
+  mapped to types directly, without modification aside from recursively
+  processing subterms.
 
 * Function application ``e₀ e₁`` is mapped to type-level function
   application ``t₀ t₁``, where ``t₀ = t2t(e₀)``, ``t₁ = t2t(e₁)``.
@@ -693,155 +856,62 @@ and fails on expressions outside of this subset.
   there's a direct type-level equivalent, and their use is an error
   otherwise.
 
+In accordance with the **Lexical Scoping Principle** of `#378 Design for Dependent Types
+<https://github.com/ghc-proposals/ghc-proposals/blob/master/proposals/0378-dependent-type-design.rst>`_,
 T2T preserves the binding structure and the meaning of the syntactic constructs
-of the resolved syntax tree. For example, in ``f T`` it will never change
-whether the ``T`` refers to a type constructor or a data constructor. Likewise,
-it will not change ``[a]`` from a singleton list to the list type, or vice
-versa. The mapping is as direct as possible and could be removed if we
-had a single syntactic category for terms and types.
+in the resolved syntax tree.
 
-Secondary Change: ``type`` herald
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+For example, in ``f T``, the T2T transformation will never change whether the
+``T`` refers to a type constructor or a data constructor. Likewise, it will not
+change ``[a]`` from a singleton list to the list type, or vice versa. The
+mapping is as direct as possible and could be removed if we had a single
+syntactic category for terms and types.
 
-This secondary change allows the user to disambiguate between the type syntax
-and term syntax in an expression/pattern context.
+Part II: Examples
+-----------------
 
-7. Extend the syntactic categories of expressions and patterns as
-   follows::
+1. A variant of ``id`` that uses visible ``forall``:
+   ::
 
-        e ::=
-          | type t
-          | ...
+     -- Definition:
+     idv :: forall a -> a -> a
+     idv a x = x :: a
 
-        p ::=
-          | type t
-          | ...
+     -- Usage:
+     n = idv Double 42
 
-   As established earlier, ``e`` stands for expressions, ``p`` for patterns,
-   and ``t`` for types.
+   This is equivalent to ``n = (42 :: Double)``.
 
-   Extend the T2T mapping as follows:
+2. A wrapper around ``typeRep`` that uses visible ``forall``:
+   ::
 
-   * ``type t`` maps to ``t``.
+     -- Definition:
+     typeRepVis :: forall a -> Typeable a => TypeRep a
+     typeRepVis a = typeRep @a
 
-   Any occurrence of ``type t`` that does not undergo the T2T mapping is
-   rejected during type checking.
+     -- Usage:
+     t = typeRepVis (Maybe String)
 
-   Guard this change behind the ``ExplicitNamespaces`` extension.
+3. A wrapper around ``sizeOf`` that uses visible ``forall`` instead of ``Proxy``:
+   ::
 
-Secondary Change: Types-in-Terms
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     -- Definition:
+     sizeOfVis :: forall a -> Storable a => Int
+     sizeOfVis a = sizeOf (Proxy :: Proxy a)
 
-This secondary change allows the user to omit the ``type`` herald in certain
-cases.
+     -- Usage:
+     n = sizeOfVis Int
 
-8. Extend the term-level syntax with several constructs that previously could
-   only occur at the type level:
+4. A wrapper around ``symbolVal`` that uses visible ``forall`` instead of ``Proxy``:
+   ::
 
-   * Function arrows: ``a -> b``
-   * Multiplicity-polymorphic function arrows: ``a %m -> b`` (under ``-XLinearTypes``)
-   * Constraint arrows: ``a => b``
-   * Universal quantification: ``forall a. b``
-   * Visible universal quantification: ``forall a -> b``.
+     -- Definition:
+     symbolValVis :: forall s -> KnownSymbol s => String
+     symbolValVis s = symbolVal (Proxy :: Proxy s)
 
-   We will call them "types-in-terms".
+     -- Usage
+     str = symbolValVis "Hello, World"
 
-   Grammatically, their constituents are terms, not types::
-
-                proposed grammar:                 as opposed to:
-         +-------------------------------+----------------------------------+
-         |                               |                                  |
-         |  e ::=                        |    e ::=                         |
-         |      | e₀ -> e₁               |        | t₀ -> t₁                |
-         |      | e₀ => e₁               |        | t₀ => t₁                |
-         |      | forall b₀..bₙ. e       |        | forall b₀..bₙ. t        |
-         |      | forall b₀..bₙ -> e     |        | forall b₀..bₙ -> t      |
-         |                               |                                  |
-         +-------------------------------+----------------------------------+
-
-   This is a necessity to avoid parsing conflicts, with the following
-   consequences:
-
-   1. The ``'`` symbol signifies Template Haskell name quotation rather than ``DataKinds`` promotion.
-   2. The ``*`` symbol is treated as an infix operator regardless of ``-XStarIsType``.
-   3. Built-in syntax for tuples and lists is interpreted as in terms.
-      That is, ``[a]`` is a singleton list rather than the type of a list,
-      and ``(a, b)`` is a pair rather than the type of a pair.
-
-   For the above grammar to work, make ``forall`` a keyword at the term
-   level. Not guarded by any extension (same motivation as `#193
-   <https://github.com/ghc-proposals/ghc-proposals/blob/master/proposals/0193-forall-keyword.rst>`_).
-
-   In name resolution, we follow the term-level rules that prioritize data
-   constructors over type constructors, and variables over type variables.
-
-   In types-in-terms, the ``forall``-bound type variables are put in the
-   term-level namespace, so that in ``\x -> f (forall x. x)``, the ``x``
-   occurrence refers to the forall-bound type variable rather than the
-   lambda-bound variable.
-
-   Extend the T2T mapping as follows:
-
-   * The types-in-terms (such as ``a -> b``, ``a => b``, ``forall a. b``) are
-     mapped to types directly, without modification aside from recursively
-     processing subterms.
-
-   Any occurrence of types-in-terms that does not undergo the T2T mapping is
-   rejected during type checking.
-
-9. When ``ViewPatterns`` are enabled, interpret ``f (a -> b) = ...``
-   as a view pattern, otherwise as ``f ((->) a b) = ...``.
-
-10. ``case ... of x -> y -> z`` is an error. We require parentheses to
-    disambiguate:
-
-    * ``case ... of (x -> y) -> z``
-    * ``case ... of x -> (y -> z)``
-
-Secondary Change: Lists and Tuples
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-This secondary change enables the use of built-in lists and tuples without any
-disambugation syntax (the ``'`` promotion syntax at the type level and the
-``type`` herald at the term level).
-
-11. Introduce a new extension, ``ListTupleTypeSyntax``, on by default,
-    which enables:
-
-    * ``[]`` as the list type constructor
-    * ``()`` as the unit type
-    * ``[a]`` the syntax of a list type
-    * ``(,)`` as the pair type constructor
-    * ``(a, b)`` as the syntax of a pair type
-
-    When the extension is on, these constructs retain their Haskell 2010
-    meaning, which depends on whether we are in a type-level or term-level
-    context.
-
-    When the extension is off, all of the above are interpreted as in terms:
-
-    * ``[]`` is always an empty list
-    * ``()`` is always the unit data constructor
-    * ``[a]`` is always a singleton list (not the list type)
-    * ``(,)`` is always the pair data constructor (not the type constructor)
-    * ``(a, b)`` is always a pair (not the type of a pair)
-
-    Likewise for tuples of higher arities.
-
-    Export the following synonym from the ``Data.List`` module::
-
-      type List = []
-
-    Export the following synonyms from the ``Data.Tuple`` module::
-
-      type Unit = ()
-      type Tuple2 = (,)
-      type Tuple3 = (,,)
-      type Tuple4 = (,,,)
-      ... -- up to the maximum tuple arity
-
-Examples
---------
 
 Compile-time color literals
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -923,7 +993,7 @@ Corner Cases
      h a = g (forall a. a->a) a
 
    The ``forall`` binds ``a`` and that binding is seen by the occurrences in ``a->a``.
-   That is, in a term the forall-bound variables are in the data namespace.
+   That is, in a term the forall-bound variables are in the term namespace.
 
 6. Built-in syntax:
    ::
@@ -937,7 +1007,7 @@ Corner Cases
    One way to change this is to use synonyms
    from ``Data.Tuple`` and ``Data.List``::
 
-     x1 = g (Tuple2 Int Bool)
+     x1 = g (TupleOf2 Int Bool)
      x2 = g (List Int)
 
    Another way is to use the ``type`` herald::
@@ -958,8 +1028,8 @@ Corner Cases
    One way to resolve this is to use synonyms
    from ``Data.Tuple`` and ``Data.List``::
 
-      a = f @(Tuple2 Int Bool)
-      b = g  (Tuple2 Int Bool)
+      a = f @(TupleOf2 Int Bool)
+      b = g  (TupleOf2 Int Bool)
 
    Another way is to use the ``type`` herald::
 
@@ -1007,6 +1077,12 @@ Effect and Interactions
   types of types is actually a retained quantifier, while the proposed ``forall
   x ->`` in types of terms is erased. This is to be resolved in the future
   by making both of them erased.
+
+* Even though types-in-terms may look like types they are considered term
+  syntax, and a variable bound by a forall-in-terms populates the term
+  namespace. This means that in ``\x -> f (forall x. x)``, the occurrence
+  of ``x`` refers to the forall-bound type variable rather than the
+  lambda-bound variable.
 
 * The renaming of a visible dependent argument is different than that of a
   dependent argument with a visibility override. Consider this code::

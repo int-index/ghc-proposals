@@ -324,19 +324,27 @@ Part I: Proposed Change Specification
    ``forall a ->`` quantifier cannot be used in types of terms.
 
 2. **Syntax**. When ``ExplicitNamespaces`` is in effect, extend the
-   grammar as follows::
+   grammar (as in the `Haskell 2010 Report <https://www.haskell.org/onlinereport/haskell2010/haskellch10.html#x17-18000010.5>`_) as follows::
 
         exp ::=
-          | 'type' type
+          | 'type' ktype
           | ...
 
         pat ::=
-          | 'type' type
+          | 'type' ktype
           | ...
+
+   Though it is not included in the Report, ``ktype`` above refers to a non-terminal in `GHC's grammar <https://gitlab.haskell.org/ghc/ghc/-/blob/e40feab039bcf687cdaefa7a3f7c862d10b9b517/compiler/GHC/Parser.y>`_. This non-terminal includes kind annotations and ``forall``-types.
+
+   The ``type`` keyword at the top-level is interpreted as it always has been; it
+   does not start an expression (as would be used in a Template Haskell declaration
+   splice) or pattern (as would be used in a pattern binding).
 
 3. **Name resolution**. A type embedded into a term with the ``type`` marker
    follows type-level name resolution rules (i.e. uses of punned identifiers
-   resolve to the type namespace).
+   resolve to the type namespace), both at binding sites and at use sites.
+
+   Without ``ScopedTypeVariables``, no type variable may be bound in a pattern.
 
    The ``ScopedTypeVariables`` extension has no effect on variables introduced
    by ``forall a ->``.
@@ -346,7 +354,8 @@ Part I: Proposed Change Specification
    type checking, is presented in more detail in
    `"A quick look at impredicativity" <https://www.microsoft.com/en-us/research/uploads/prod/2020/01/quick-look-icfp20.pdf>`_.
 
-   * In inference mode, we never infer ``forall x -> t``.
+   * In inference mode, we never infer ``forall x -> t`` as the type of a lambda expression.
+     Accordingly, writing ``\ (type a) -> ...`` in inference mode is always an error.
 
    * In checking mode, in a function application chain ``f e1 e2 e3``, we
      follow the rules shown in Figure 4 of "A quick look at impredicativity",
@@ -603,11 +612,14 @@ Syntax
       That is, ``[a]`` is a singleton list rather than the type of a list,
       and ``(a, b)`` is a pair rather than the type of a pair.
 
-2. Make ``forall`` a keyword at the term level. Not guarded by any extension
+2. The syntactic descriptions here applying to expressions apply equally to patterns, though
+   we will continue to discuss only expressions.
+
+3. Make ``forall`` a keyword at the term level. Not guarded by any extension
    (same motivation as `#193 <https://github.com/ghc-proposals/ghc-proposals/blob/master/proposals/0193-forall-keyword.rst>`_).
    This implies ``forall`` is no longer a valid identifier.
 
-3. Introduce a new extension, ``ListTupleTypeSyntax``, on by default,
+4. Introduce a new extension, ``ListTupleTypeSyntax``, on by default,
    which enables:
 
    * ``[]`` as the list type constructor
@@ -646,10 +658,10 @@ Syntax
    disambugation syntax (the ``'`` promotion syntax at the type level or the
    ``type`` herald at the term level).
 
-4. When ``ViewPatterns`` are enabled, interpret ``f (a -> b) = ...``
+5. When ``ViewPatterns`` are enabled, interpret ``f (a -> b) = ...``
    as a view pattern, otherwise as ``f ((->) a b) = ...``.
 
-5. ``case ... of x -> y -> z`` is an error. We require parentheses to
+6. ``case ... of x -> y -> z`` is an error. We require parentheses to
    disambiguate:
 
    * ``case ... of (x -> y) -> z``
@@ -658,7 +670,7 @@ Syntax
 Name resolution
 ~~~~~~~~~~~~~~~
 
-6. During name resolution,
+7. During name resolution,
 
    * Identifiers bound in term syntax populate the term namespace;
      identifiers bound in type syntax populate the type namespace.
@@ -683,7 +695,7 @@ Name resolution
 Implicit quantification
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-7. Implicit quantification is an existing feature that allows the programmer to
+8. Implicit quantification is an existing feature that allows the programmer to
    omit a ``forall``::
 
      g ::           a -> a    -- implicit
@@ -715,7 +727,7 @@ Implicit quantification
 Type checking
 ~~~~~~~~~~~~~
 
-8. Introduce an additional typing rule that transforms term arguments into type
+9. Introduce an additional typing rule that transforms term arguments into type
    arguments::
 
      rho = t2t(e)
@@ -729,17 +741,17 @@ Type checking
    parsed and renamed as a term, but then mapped to a type.
 
 
-9. Any uses of terms in types are ill-typed:
-   ::
+10. Any uses of terms in types are ill-typed:
+    ::
 
-     a = 42; f :: Proxy a -> Proxy b   -- invalid occurrence of "a" in a type-level position
+      a = 42; f :: Proxy a -> Proxy b   -- invalid occurrence of "a" in a type-level position
 
-   Any uses of types in terms that do not undergo the T2T transformation are also ill-typed::
-   ::
+    Any uses of types in terms that do not undergo the T2T transformation are also ill-typed::
+    ::
 
-     f _ = Int                         -- invalid occurrence of "Int" in a term-level position
+      f _ = Int                         -- invalid occurrence of "Int" in a term-level position
 
-10. When in the checking mode of bidirectional type checking (e.g. in a function
+11. When in the checking mode of bidirectional type checking (e.g. in a function
     binding with an explicit type signature), allow a pattern to bind type
     variables in the term namespace, such as ``x`` here::
 
@@ -770,7 +782,7 @@ Type checking
 Namespaces vs Semantics
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-11. With the proposed changes, the namespace of an identifier is no longer tied
+12. With the proposed changes, the namespace of an identifier is no longer tied
     to whether it stands for a type variable or a term variable.
 
     Before this proposal, all term variables (retained, values, runtime) used
@@ -972,7 +984,7 @@ Corner Cases
      f :: forall a. [a] -> [a]
      f x = g a a
 
-   Both ``a`` arguments to ``g`` are bound to term-level bidning for ``a``.  In
+   Both ``a`` arguments to ``g`` are bound to term-level binding for ``a``.  In
    terms, a term-level binding "wins". If ``g`` turns out to have a visible
    dependent type, the program will be rejected because ``g``'s first argument
    is a type, not a term.

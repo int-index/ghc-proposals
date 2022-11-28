@@ -35,10 +35,225 @@ form by the user program, to allow use by logging libraries (for instance, see
 <https://github.com/cachix/katip-raven/issues/1#issuecomment-625389463>`_),
 automatic error reporting, code analysis tools, and the like.
 
+
+Proposed Change Specification
+-----------------------------
+
+Annotations
+~~~~~~~~~~~
+
+Export the following new definitions from ``Control.Exception.Annotation``:
+
+* The class of exception annotations:
+  ::
+    class Typeable a => ExceptionAnnotation a where
+      displayExceptionAnnotation :: a -> String
+
+  In instances, ``displayExceptionAnnotation`` defaults to ``show``.
+
+* An existential wrapper for dynamically typed
+  exception annotations::
+
+    data SomeExceptionAnnotation where
+        SomeExceptionAnnotation ::
+          forall a. (ExceptionAnnotation a) => a -> SomeExceptionAnnotation
+
+Backtraces
+~~~~~~~~~~
+
+Export the following new definitions from ``GHC.Exception.Backtrace``:
+
+* An enumeration of GHC backtrace mechanisms:
+  ::
+
+    type BacktraceMechanism :: Type -> Type
+    data BacktraceMechanism a where
+      CostCentreBacktrace   :: BacktraceMechanism (Ptr CostCentreStack)
+      HasCallStackBacktrace :: BacktraceMechanism GHC.Stack.CallStack
+      ExecutionBacktrace    :: BacktraceMechanism [GHC.ExecutionStack.Location]
+      IPEBacktrace          :: BacktraceMechanism [StackEntry]
+
+* During program execution, each backtrace mechanism is either enabled or
+  disabled. This is tracked in global mutable state that can be accessed using
+  the following functions::
+
+    getEnabledBacktraceMechanisms :: IO EnabledBacktraceMechanisms
+    setEnabledBacktraceMechanisms :: EnabledBacktraceMechanisms -> IO ()
+
+    newtype EnabledBacktraceMechanisms =
+      EnabledBacktraceMechanisms {
+        backtraceMechanismEnabled :: forall a. BacktraceMechanism a -> Bool
+      }
+
+  Note that ``EnabledBacktraceMechanisms`` is isomorphic to ``(Bool, Bool, Bool, Bool)``,
+  i.e. a flag per mechanism.
+
+  By default, ``HasCallStackBacktrace`` is enabled and other mechanisms are disabled.
+
+* A record of collected backtraces:
+  ::
+
+    newtype Backtraces =
+      Backtraces {
+        getBacktrace :: forall a. BacktraceMechanism a -> Maybe a
+      }
+
+  Note that ``Backtraces`` is isomorphic to a record containing:
+
+  * ``Maybe (Ptr CostCentreStack)``
+  * ``Maybe (GHC.Stack.CallStack)``
+  * ``Maybe [GHC.ExecutionStack.Location]``
+  * ``Maybe [StackEntry]``
+
+* An instance of ``ExceptionAnnotation`` for ``Backtraces``:
+  ::
+
+    instance ExceptionAnnotation Backtraces where
+      displayExceptionAnnotation (Backtraces b) = ...
+
+* A procedure to collect backtraces at a given point in the program:
+  ::
+    collectBacktraces :: HasCallStack => IO Backtraces
+
+  This function collects backtraces for the currently enabled mechanisms.
+  As a consequence, enabling or disabling a mechanism will affect its performance.
+
+Contexts
+~~~~~~~~
+
+Export the following new definitions from ``Control.Exception.Context``:
+
+* Abstract data type for exception contexts:
+  ::
+
+    data ExceptionContext
+
+  We do not export its constructors to allow for future changes.
+
+* Functions to construct, extend, and deconstruct exception contexts:
+  ::
+
+    noExceptionContext :: ExceptionContext
+    addExceptionAnnotation :: ExceptionAnnotation a => a -> ExceptionContext -> ExceptionContext
+    getExceptionAnnotations :: ExceptionAnnotation a => ExceptionContext -> [a]
+    getAllExceptionAnnotations :: ExceptionContext -> [SomeExceptionAnnotation]
+
+  The order of annotations is preserved:
+  ::
+
+    getAllExceptionAnnotations $
+        addExceptionAnnotation ann1 $
+        addExceptionAnnotation ann2 $
+        ...
+        addExceptionAnnotation annk $
+        noExceptionContext
+      ≡
+    [
+      SomeExceptionAnnotation ann1,
+      SomeExceptionAnnotation ann2,
+      ...
+      SomeExceptionAnnotation annk
+    ]
+
+  Advertise the following time complexity for operations on contexts (the actual
+  implementation may be more efficient):
+
+  * ``addExceptionAnnotation`` – O(1)
+  * ``getExceptionAnnotations`` – O(n)
+  * ``getAllExceptionAnnotations`` – O(n)
+
+* A constraint synonym for an implicitly passed exception context:
+  ::
+
+    type HasExceptionContext = (?exceptionContext :: ExceptionContext)
+
+  This constraint shares some similarities with ``HasCallStack``:
+
+  * It is a built-in constraint with special solving behavior.
+    When it can not be solved from the givens, it defaults to
+    ``noExceptionContext`` instead of producing an error.
+  * The fact that it is defined as an implicit parameter is an
+    implementation detail and is not considered a part of the API.
+
+* A boolean flag in ``ExceptionContext`` tracking if backtraces should be
+  collected:
+  ::
+
+    getBacktracesEnabled :: ExceptionContext -> Bool
+    setBacktracesEnabled :: Bool -> ExceptionContext -> ExceptionContext
+
+    backtracesEnabled :: HasExceptionContext => Bool
+    enableBacktraces, disableBacktraces :: (HasExceptionContext => r) -> (HasExceptionContext => r)
+
+  The default value used in ``noExceptionContext`` is ``True``.
+
+  This is separate from the global per-mechanism flag. It can be used to disable
+  the overhead of collecting backtraces when exceptions are repurposed for
+  non-exceptional control flow.
+
+Exceptions
+~~~~~~~~~~
+
+In ``Control.Exception``, modify existing definitions as follows:
+
+* Store the exception context in ``SomeException``:
+  ::
+
+    - data SomeException = forall e.                      (Exception e) => SomeException e
+    + data SomeException = forall e. (HasExceptionContext, Exception e) => SomeException e
+
+* Take the exception context in the ``toException`` method of the ``Exception`` class:
+  ::
+
+    -   toException ::                      (Exception e) => e -> SomeException
+    +   toException :: (HasExceptionContext, Exception e) => e -> SomeException
+
+  Note that due to special solving behavior, the context defaults to
+  ``noExceptionContext`` when unavailable.
+
+* Take the exception context in ``throw`` and ``throwIO``:
+  ::
+
+    - throw :: forall (r :: RuntimeRep). forall (a :: TYPE r). forall e.                      (Exception e) => e -> a
+    + throw :: forall (r :: RuntimeRep). forall (a :: TYPE r). forall e. (HasExceptionContext, Exception e) => e -> a
+
+    - throwIO ::                      (Exception e) => e -> IO a
+    + throwIO :: (HasExceptionContext, Exception e) => e -> IO a
+
+  When ``backtracesEnabled`` is ``True`` in the given context, both of those
+  functions invoke ``collectBacktraces`` and add its result to the exception
+  context with ``addExceptionAnnotation``.
+
+* Provide the exception context to the handler in ```catch`` and ``handle``:
+  ::
+
+    - catch :: Exception e => IO a ->                        (e -> IO a) -> IO a
+    + catch :: Exception e => IO a -> (HasExceptionContext => e -> IO a) -> IO a
+
+    - handle :: Exception e =>                        (e -> IO a) -> IO a -> IO a
+    + handle :: Exception e => (HasExceptionContext => e -> IO a) -> IO a -> IO a
+
+  Modify ``catchJust`` and ``handleJust`` accordingly (mutatis mutandis).
+
+* Operations ``try`` and ``tryJust`` stay unchanged, as we are unable to include
+  an implicit ``HasExceptionContext`` in their result. Document this issue and
+  direct users to prefer ``catch`` and ``handle`` instead.
+
+Export the following new definitions from ``Control.Exception``:
+
+* A function that catches any exception thrown by an ``IO`` action, adds an
+  annotation to it using ``addExceptionAnnotation``, and then rethrows it: ::
+
+    annotateIO :: ExceptionAnnotation a => a -> IO r -> IO r
+
+  It never calls ``collectBacktraces``, adding **only** the user-specified
+  annotation.
+
 Proposed Change Specification
 -----------------------------
 
 This proposal consists of three largely-independent parts:
+
 
 1. augmenting the current root of the exception hierarchy,
    ``SomeException``, with additional metadata in the form of an

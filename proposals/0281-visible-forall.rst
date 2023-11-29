@@ -374,18 +374,10 @@ Part I: Proposed Change Specification
      x = f (type Int)   -- OK
      x = type Int       -- invalid use of a type in a term
 
-   This is checked during type checking, so Template Haskell is unaffected, and
-   ``[e| type Int |]`` is allowed (but different from ``[t| Int |]``).
+   This is checked during type checking, so Template Haskell is unaffected:
+   ``[e| type Int |]`` and ``[p| type Int |]`` are both allowed but different
+   from ``[t| Int |]``.
 
-   Furthermore, any pattern of form ``type t`` must be either a variable or a
-   wildcard::
-
-     f (type x)   = ...    -- OK
-     f (type _)   = ...    -- OK
-     f (type Int) = ...    -- invalid use of a type in a term
-
-   This is also checked during type checking, so Template Haskell must be able
-   to represent patterns such as ``[p| type Int |]``.
 
 6. **Erasure**. In types of terms, ``forall a ->`` is an erased quantifier.
    Making ``forall a ->`` erased in types of types is out of scope of this
@@ -730,24 +722,6 @@ Type checking
 
     The ``x`` identifier is bound in the term namespace, but stands for an
     erased, ``forall``-bound type variable.
-
-    Just as with patterns that use the ``type`` herald explicitly, we permit
-    only variables and wildcards in such positions::
-
-      f :: forall a -> ...
-      f x   = ...               -- OK
-      f _   = ...               -- OK
-      f Int = ...               -- illegal to match on a type
-
-    We could, but we do not relax this requirement even when the type is statically known::
-
-      data T a where
-        Typed :: forall a -> a -> T a
-
-      g :: T Int -> ...
-      g (Typed Int x) = ...   -- Reasonable, but no.
-
-    This is a conservative decision that can be revised in a later proposal.
 
 Namespaces vs Semantics
 ~~~~~~~~~~~~~~~~~~~~~~~

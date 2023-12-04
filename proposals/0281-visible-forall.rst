@@ -358,9 +358,9 @@ Part I: Proposed Change Specification
      follow the rules shown in Figure 4 of "A quick look at impredicativity",
      extended as follows::
 
-        G |- sigma[a := rho];                 pis  ~>  Theta; phis; rho_r
-        ------------------------------------------------------------------  ITVDQ
-        G |- (forall a -> sigma); (type rho), pis  ~>  Theta; phis; rho_r
+        G |- sigma_b[a := sigma_a];                     pis  ~>  Theta; phis; rho_r
+        ---------------------------------------------------------------------------  ITVDQ
+        G |- (forall a -> sigma_b);     (type sigma_a), pis  ~>  Theta; phis; rho_r
 
    * In checking mode, in a function binding ``f (type x) = ...`` or a lambda
      ``\(type x) -> ...``, the ``x`` is a fresh skolem.
@@ -485,7 +485,7 @@ Note that as long as we limit ourselves to part I of this proposal, we need the
 syntactically valid term. If the programer were to write ``symbolValVis "Hello, World"``,
 they would get an error message stating that a term argument was
 received where a type argument was expected. That's because our typing rule
-``ITVDQ`` explicitly requires the argument to be of form ``type rho``.
+``ITVDQ`` explicitly requires the argument to be of form ``type sigma``.
 
 Could we extend our system to permit arguments without the ``type`` prefix?
 That is precisely the subject of part II.
@@ -750,10 +750,10 @@ Type checking
 8. Generalize the ``ITVDQ`` rule introduced earlier
    by using ``t2t``::
 
-     rho = t2t(e)
-     G |- sigma[a := rho];         pis  ~>  Theta; phis; rho_r
-     ---------------------------------------------------------- ITVDQ-T2T
-     G |- (forall a -> sigma);  e, pis  ~>  Theta; phis; rho_r
+     sigma_a = t2t(e)
+     G |- sigma_b[a := sigma_a];         pis  ~>  Theta; phis; rho_r
+     --------------------------------------------------------------- ITVDQ-T2T
+     G |- (forall a -> sigma_b);      e, pis  ~>  Theta; phis; rho_r
 
    ``t2t`` transforms term arguments into type arguments, see "T2T-Mapping"
    below for an informal definition.

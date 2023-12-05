@@ -637,24 +637,40 @@ Syntax
 
    We will call them **types-in-terms**.
 
-   Grammatically, their constituents are terms, not types::
+   To that end, extend the grammar of expressions and patterns as follows:
+   ::
 
-                   proposed grammar:                      as opposed to:
-         ┌────────────────────────────────────┬───────────────────────────────────────┐
-         │                                    │                                       │
-         │  exp ::=                           │    exp ::=                            │
-         │      | exp₀ '->' exp₁              │        | type₀ '->' type₁             │
-         │      | exp₀ '=>' exp₁              │        | type₀ '=>' type₁             │
-         │      | 'forall' tv_bndrs '.'  exp  │        | 'forall' tv_bndrs '.'  type  │
-         │      | 'forall' tv_bndrs '->' exp  │        | 'forall' tv_bndrs '->' type  │
-         │                                    │                                       │
-         └────────────────────────────────────┴───────────────────────────────────────┘
+     exp ::=
+       | infixexp
+       | infixexp      '->'  exp
+       | infixexp mult '->'  exp
+       | infixexp      '->.' exp
+       | infixexp      '=>'  exp
+       | 'forall' tv_bndrs '.'  exp
+       | 'forall' tv_bndrs '->' exp
 
-   In ``e1 -> e2`` and ``e1 => e2``, using the expression grammar for the LHS is
-   a necessity to avoid parsing conflicts.
+     pat ::=
+       | infixpat
+       | infixpat      '->'  pat
+       | infixpat mult '->'  pat
+       | infixpat      '->.' pat
+       | infixpat      '=>'  pat
+       | 'forall' tv_bndrs '.'  pat
+       | 'forall' tv_bndrs '->' pat
 
-   Patterns reuse the expression grammar in GHC. The new "terms-in-types"
-   productions are also valid in patterns.
+   Note that the constituents of terms-in-types use the term syntax::
+
+                   proposed grammar:                    as opposed to:
+         ┌───────────────────────────────────┬─────────────────────────────────────┐
+         │  exp ::=                          │  exp ::=                            │
+         │      | infixexp '->' exp          │      | btype '->' ctype             │
+         │      | 'forall' tv_bndrs '.' exp  │      | 'forall' tv_bndrs '.' ctype  │
+         │      | ...                        │      | ...                          │
+         └───────────────────────────────────┴─────────────────────────────────────┘
+
+   The use of term syntax on the LHS of ``e1 -> e2`` and ``e1 => e2`` is a
+   necessity to avoid parsing conflicts. The use of term syntax on the RHS is
+   done for consistency with the LHS.
 
 3. Make ``forall`` a keyword at the term level (in expressions and patterns).
    Not guarded by any extension (same motivation as `#193 <https://github.com/ghc-proposals/ghc-proposals/blob/master/proposals/0193-forall-keyword.rst>`_).

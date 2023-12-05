@@ -626,8 +626,8 @@ Part II: Proposed Change Specification
 Syntax
 ~~~~~~
 
-1. Extend the term syntax with several constructs that
-   previously could only occur at the type level:
+1. Extend the term syntax (expressions and patterns) with several constructs
+   that previously could only occur at the type level:
 
    * Function arrows: ``a -> b``
    * Multiplicity-polymorphic function arrows: ``a %m -> b`` (under ``-XLinearTypes``)
@@ -650,20 +650,14 @@ Syntax
          │                                    │                                       │
          └────────────────────────────────────┴───────────────────────────────────────┘
 
-   This is a necessity to avoid parsing conflicts, with the following
-   consequences:
+   In ``e1 -> e2`` and ``e1 => e2``, using the expression grammar for the LHS is
+   a necessity to avoid parsing conflicts.
 
-   1. The ``'`` symbol signifies Template Haskell name quotation rather than ``DataKinds`` promotion.
-   2. The ``*`` symbol is treated as an infix operator regardless of ``-XStarIsType``.
-   3. Built-in syntax for tuples and lists is interpreted as in terms.
-      That is, ``[a]`` is a singleton list rather than the type of a list,
-      and ``(a, b)`` is a pair rather than the type of a pair.
+   Patterns reuse the expression grammar in GHC. The new "terms-in-types"
+   productions are also valid in patterns.
 
-2. The syntactic descriptions here applying to expressions apply equally to patterns, though
-   we will continue to discuss only expressions.
-
-3. Make ``forall`` a keyword at the term level. Not guarded by any extension
-   (same motivation as `#193 <https://github.com/ghc-proposals/ghc-proposals/blob/master/proposals/0193-forall-keyword.rst>`_).
+3. Make ``forall`` a keyword at the term level (in expressions and patterns).
+   Not guarded by any extension (same motivation as `#193 <https://github.com/ghc-proposals/ghc-proposals/blob/master/proposals/0193-forall-keyword.rst>`_).
    This implies ``forall`` is no longer a valid identifier.
 
    For three releases before this change takes place, include a new warning
@@ -673,8 +667,10 @@ Syntax
    This change applies to ``∀`` (the ``UnicodeSyntax`` rendition of ``forall``)
    as well.
 
-4. When ``ViewPatterns`` are enabled, interpret ``f (a -> b) = ...``
-   as a view pattern, otherwise as ``f ((->) a b) = ...``.
+4. Adding ``p1 -> p2`` to the syntax of patterns (see "types-in-terms" above)
+   is incompatible with ``ViewPatterns``. When both ``RequiredTypeArguments``
+   and ``ViewPatterns`` are enabled, the latter takes precedence.
+   The programmer can write ``type (t1 -> t2)`` or ``(->) t1 t2`` instead.
 
 5. ``case ... of x -> y -> z`` is an error. We require parentheses to
    disambiguate:
@@ -755,11 +751,15 @@ Type checking
      --------------------------------------------------------------- ITVDQ-T2T
      G |- (forall a -> sigma_b);      e, pis  ~>  Theta; phis; rho_r
 
-   ``t2t`` transforms term arguments into type arguments, see "T2T-Mapping"
-   below for an informal definition.
+   ``t2t`` transforms term arguments into type arguments, see the "T2T-Mapping"
+   section for an informal definition of ``t2t``.
 
-   In other words, given ``f :: forall a -> t``, the ``x`` in ``f x`` is
-   parsed and renamed as a term, but then mapped to a type.
+   That is, given ``f :: forall a -> t``, the argument ``e`` in ``f e``
+   is parsed and renamed as a term, but then mapped to a type.
+
+   In the same way, generalize the type checking rule for patterns to invoke
+   ``t2t`` to transform a pattern to a type when the function or constructor has
+   a visible forall in its type.
 
 9.  Any uses of terms in types are ill-typed:
     ::
@@ -793,17 +793,6 @@ Type checking
 
     In general, we permit term patterns in positions where type patterns are
     expected by applying the T2T transformation, see "T2T-Mapping" below.
-
-Namespaces vs Semantics
-~~~~~~~~~~~~~~~~~~~~~~~
-
-11. With the proposed changes, the namespace of an identifier is no longer tied
-    to whether it stands for a type variable or a term variable.
-
-    Before this proposal, all term variables (retained, values, runtime) used
-    names from the term namespace, and all type variables (erased, types,
-    compile-time) used names from the type namespace. This is no longer the
-    case.
 
 T2T-Mapping
 ~~~~~~~~~~~
@@ -1242,6 +1231,59 @@ Effect and Interactions
   proposal is a step towards dependent types, but it does not go all the way.
   Accepting the program above is left as future work.
 
+* Before this proposal, all term variables (retained, values, runtime) used
+  names from the term namespace, and all type variables (erased, types,
+  compile-time) used names from the type namespace.
+
+  With the changes proposed, the namespace of a variable is no longer a reliable
+  indicator of the level (term level or type level) of the entity that the
+  variable stands for. Consider::
+
+    f :: forall a -> String
+    f = ...
+
+    g :: forall a -> Show a => a -> String
+    g t x = show @t (x :: t) ++ f t
+
+  Now let us compare ``x`` and ``t``
+
+  * The name ``x`` is bound in the term namespace. It is a true term variable:
+    it is used as a value argument to ``show``; it exists at the term level.
+  * The name ``t`` is also bound in the term namespace. However, ``t`` denotes
+    a type variable: it is used in the type application ``show @t``, in the type
+    annotation ``x :: t``, and as a required type argument in ``f t``; it exists
+    at the type level.
+
+* Even in the absence of punning, term syntax and type syntax differ in a few
+  subtle ways
+
+  1. In term syntax with ``TemplateHaskell`` enabled, the ``'`` symbol signifies
+     name quotation; in type syntax with ``DataKinds`` enabled, ``'`` selects
+     the term namespace.
+
+  2. In term syntax, ``*`` is always an infix operator; in type syntax with
+     ``StarIsType`` enabled, ``*`` is built-in notation for ``Data.Kind.Type``.
+
+     This discrepancy can be resolved by disabling ``StarIsType``, which is
+     slated for deprecation by the accepted
+     GHC Proposal `#143 <https://github.com/ghc-proposals/ghc-proposals/blob/master/proposals/0143-remove-star-kind.rst>`_.
+
+  3. Term syntax allows binding local operators, but type syntax with
+     ``TypeOperators`` does not::
+
+       -- Term syntax
+       f (:#) = ...   -- usage of constructor (:#)
+       f (#)  = ...   -- binding a local variable (#)
+
+       -- Type syntax
+       f (type (:#)) = ...   -- usage of type constructor (:#)
+       f (type (#))  = ...   -- usage of type constructor (#)
+
+     To be consistent with terms, ``type (#)`` would have to be a binding of a
+     local type variable named ``(#)``.
+
+  Accounting for these discrepancies is a non-goal for the T2T transformation
+
 Costs and Drawbacks
 -------------------
 
@@ -1364,9 +1406,10 @@ Alternatives
    declarations in a similar manner, but nothing compels us to do so either.
 
 9. We could say that ``a -> b`` is a view pattern regardless of enabled
-   extensions and thereby make this proposal less fork-like; the problem is
-   that it would create an asymmetry between use sites ``f (MkT (Int -> Bool))``
-   and definition sites ``f (MkT (a -> b)) = ...``.
+   extensions and thereby make this proposal less fork-like; the problem is that
+   it would create an asymmetry: ``(t1 -> t2)`` would be allowed in types,
+   ``(e1 -> e2)`` would be allowed in expressions, but ``(p1 -> p2)`` would not
+   be allowed in patterns (here the arrow stands for the function type).
 
 Unresolved Questions
 --------------------

@@ -637,36 +637,85 @@ Syntax
 
    We will call them **types-in-terms**.
 
-   To that end, extend the grammar of expressions and patterns as follows:
+   To that end, we change the grammar of expressions and patterns as follows.
+   Start with these nonterminals based on the `Haskell 2010 Report <https://www.haskell.org/onlinereport/haskell2010/haskellch10.html#x17-18000010.5>`_,
+   modified to account for pattern signatures, view patterns, and the ``type`` herald::
+
+     exp ::=
+       | 'type' ktype                    -- only with ExplicitNamespaces (see Part I of #281)
+       | infixexp :: [context =>] type
+       | infixexp
+
+     viewpat ::=
+       | pat
+       | exp '->' viewpat                -- only with ViewPatterns
+
+     pat ::=
+       | 'type' ktype                    -- only with ExplicitNamespaces (see Part I of #281)
+       | infixpat :: [context =>] type   -- only with PatternSignatures  (see #448)
+       | infixpat
+
+     infixexp ::=
+       | lexp qop infixexp
+       | - infixexp
+       | lexp
+
+     infixpat ::=
+       | lpat qconop infixpat
+       | lpat
+
+   Introduce the following changes:
+
+   * add new non-terminals ``infixexp2`` and ``infixpat2`` that include terms-in-types
+   * update ``exp`` and ``pat`` to use the new non-terminals in place
+     of ``infixexp`` and ``infixpat`` respectively
+   * rearrange ``viewpat`` to avoid parsing conflicts
+
    ::
 
      exp ::=
-       | infixexp
-       | infixexp      '->'  exp
-       | infixexp mult '->'  exp
-       | infixexp      '->.' exp
-       | infixexp      '=>'  exp
-       | 'forall' tv_bndrs '.'  exp
-       | 'forall' tv_bndrs '->' exp
+       | 'type' ktype                    -- only with ExplicitNamespaces (see Part I of #281)
+       | infixexp2 :: [context =>] type
+       | infixexp2
+
+     viewpat ::= pat  -- the other production has been moved to infixpat2
 
      pat ::=
-       | infixpat
-       | infixpat      '->'  pat
-       | infixpat mult '->'  pat
-       | infixpat      '->.' pat
-       | infixpat      '=>'  pat
-       | 'forall' tv_bndrs '.'  pat
-       | 'forall' tv_bndrs '->' pat
+       | 'type' ktype                    -- only with ExplicitNamespaces (see Part I of #281)
+       | infixpat2 :: [context =>] type  -- only with PatternSignatures  (see #448)
+       | infixpat2
 
-   Note that the constituents of terms-in-types use the term syntax::
+     infixexp2 ::=
+            | infixexp
+      (NEW) | infixexp      '->'  infixexp2      -- only with RequiredTypeArguments
+      (NEW) | infixexp mult '->'  infixexp2      -- only with RequiredTypeArguments
+      (NEW) | infixexp      '->.' infixexp2      -- only with RequiredTypeArguments
+      (NEW) | infixexp      '=>'  infixexp2      -- only with RequiredTypeArguments
+      (NEW) | 'forall' tv_bndrs '.'  infixexp2   -- only with RequiredTypeArguments
+      (NEW) | 'forall' tv_bndrs '->' infixexp2   -- only with RequiredTypeArguments
+
+     infixpat2 ::=
+            | infixpat
+      (NEW) | infixpat      '->'  infixpat2      -- only with RequiredTypeArguments and /without/ ViewPatterns (conflict described below)
+      (MOV) | infixexp      '->'  infixpat2      -- only with ViewPatterns and /without/ RequiredTypeArguments (conflict described below)
+      (NEW) | infixpat mult '->'  infixpat2      -- only with RequiredTypeArguments
+      (NEW) | infixpat      '->.' infixpat2      -- only with RequiredTypeArguments
+      (NEW) | infixpat      '=>'  infixpat2      -- only with RequiredTypeArguments
+      (NEW) | 'forall' tv_bndrs '.'  infixpat2   -- only with RequiredTypeArguments
+      (NEW) | 'forall' tv_bndrs '->' infixpat2   -- only with RequiredTypeArguments
+
+     -- infixexp and infixpat are unchanged
+
+   Note that the constituents of terms-in-types use the term syntax.
+   For example::
 
                    proposed grammar:                    as opposed to:
-         ┌───────────────────────────────────┬─────────────────────────────────────┐
-         │  exp ::=                          │  exp ::=                            │
-         │      | infixexp '->' exp          │      | btype '->' ctype             │
-         │      | 'forall' tv_bndrs '.' exp  │      | 'forall' tv_bndrs '.' ctype  │
-         │      | ...                        │      | ...                          │
-         └───────────────────────────────────┴─────────────────────────────────────┘
+         ┌──────────────────────────────────────┬───────────────────────────────────┐
+         │  infixexp2 ::=                       │  infixexp2 ::=                    │
+         │    | infixexp '->' infixexp2         │    | btype '->' ctype             │
+         │    | 'forall' tv_bndrs '.' infixexp2 │    | 'forall' tv_bndrs '.' ctype  │
+         │    | ...                             │    | ...                          │
+         └──────────────────────────────────────┴───────────────────────────────────┘
 
    The use of term syntax on the LHS of ``e1 -> e2`` and ``e1 => e2`` is a
    necessity to avoid parsing conflicts. The use of term syntax on the RHS is
@@ -687,6 +736,29 @@ Syntax
    is incompatible with ``ViewPatterns``. When both ``RequiredTypeArguments``
    and ``ViewPatterns`` are enabled, the latter takes precedence.
    The programmer can write ``type (t1 -> t2)`` or ``(->) t1 t2`` instead.
+
+   In order to reconcile the grammar of ``RequiredTypeArguments`` with
+   ``ViewPatterns``, the precedence of the latter relative to pattern signatures
+   is changed::
+
+        f (e -> p :: t)   = ...     -- user-written function LHS
+        f (e -> (p :: t)) = ...     -- old parse
+        f ((e -> p) :: t) = ...     -- new parse
+
+   The new parse is consistent with kind signatures, e.g. ``Int -> Bool :: Type``
+   is parsed as ``(Int -> Bool) :: Type``, not ``Int -> (Bool :: Type)``.
+
+   We avoid a breaking change as follows. When GHC encounters an unparenthesized
+   view pattern ``e -> p :: t``, it will post-process the AST to rejig the new
+   parse into the old parse. When that happens, emit a new warning ``-Wview-pattern-signatures``
+   included in ``-Wdefault``. The warning text will suggest to parenthesize the
+   RHS of the view pattern.
+
+   * It is not viable to avoid this change by simply removing support
+     for ``p1 -> p2`` from the grammar of patterns because the actual
+     implementation in GHC reuses the expression grammar to parse patterns.
+   * A future proposal amendment might make the breaking change by committing to
+     the new parse, but no earlier than after three GHC releases with the warning.
 
 5. ``case ... of x -> y -> z`` is an error. We require parentheses to
    disambiguate:
